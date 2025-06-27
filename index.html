@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EcoAgenda - Gestión de Recolecciones</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles for better UX */
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .modal {
+            animation: fadeIn 0.3s ease-out;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: scale(0.95); }
+            to { opacity: 1; transform: scale(1); }
+        }
+        /* Custom scrollbar for calendar day view */
+        .day-column::-webkit-scrollbar {
+            width: 8px;
+        }
+        .day-column::-webkit-scrollbar-track {
+            background: #f1f5f9;
+        }
+        .day-column::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 4px;
+        }
+        .day-column::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8;
+        }
+        .is-today {
+            background-color: #eef2ff !important; /* Indigo 50 */
+            border: 1px solid #c7d2fe; /* Indigo 200 */
+        }
+        .is-today .date-number {
+             color: #4f46e5; /* Indigo 600 */
+             font-weight: 900;
+        }
+        #add-new-btn-floating {
+            position: fixed;
+            top: 6rem; /* Adjust based on header height */
+            right: 1.5rem; /* Moved to the right */
+            left: auto;
+            z-index: 30;
+        }
+    </style>
+     <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700;900&display=swap" rel="stylesheet">
+</head>
+<body class="bg-gray-50">
+
+    <div id="app-container">
+         <!-- Floating Add New Button -->
+        <button id="add-new-btn-floating" class="flex items-center bg-indigo-600 text-white font-bold py-2 px-4 rounded-full hover:bg-indigo-700 transition duration-300 shadow-lg">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"></path></svg>
+            <span class="ml-2 hidden sm:inline">Agregar</span>
+        </button>
+
+        <!-- Header -->
+        <header class="bg-white shadow-md sticky top-0 z-20">
+            <div class="container mx-auto px-4 sm:px-6 lg:px-8">
+                <div class="flex items-center justify-between h-20">
+                    <div class="flex flex-col items-start">
+                       <img src="https://ecofibras.com.mx/wp-content/uploads/2021/05/logo-ecofibras.png" alt="Logo Ecofibras" class="h-10" onerror="this.onerror=null; this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                       <div class="hidden flex-col items-start" style="display: none;">
+                           <span class="text-2xl font-bold text-gray-800">EcoAgenda</span>
+                           <span class="text-xs text-gray-500 opacity-75 -mt-1">by Adhal Cabrera</span>
+                       </div>
+                    </div>
+                   
+                    <nav id="main-nav" class="flex space-x-2 sm:space-x-4">
+                        <button data-view="agenda" class="nav-btn px-3 py-2 rounded-md text-sm font-medium bg-indigo-600 text-white">Agenda</button>
+                        <button data-view="clientes" class="nav-btn px-3 py-2 rounded-md text-sm font-medium text-gray-600 hover:bg-gray-200">Clientes</button>
+                        <button data-view="operadores" class="nav-btn px-3 py-2 rounded-md text-sm font-medium text-gray-600 hover:bg-gray-200">Operadores</button>
+                    </nav>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main id="main-content" class="container mx-auto p-4 sm:p-6 lg:p-8">
+            <!-- Dynamic content will be injected here -->
+        </main>
+    </div>
+    
+    <!-- Modal Container -->
+    <div id="modal-container"></div>
+
+    <!-- Main Application Logic -->
+    <script>
+        // --- STATE MANAGEMENT ---
+        let state = {
+            currentView: 'agenda',
+            calendarView: 'week', // 'day', 'week', 'month'
+            currentDate: new Date(),
+            clients: [],
+            operators: [],
+            events: [],
+            editingItem: null,
+        };
+        
+        // --- LOCAL STORAGE ---
+        function saveState() {
+            localStorage.setItem('ecoAgendaState', JSON.stringify(state));
+        }
+
+        function loadState() {
+            const savedState = localStorage.getItem('ecoAgendaState');
+            if (savedState) {
+                const parsedState = JSON.parse(savedState);
+                // Re-hydrate dates, as they are stored as strings
+                parsedState.currentDate = new Date(parsedState.currentDate);
+                parsedState.events = parsedState.events.map(e => ({...e, start: new Date(e.start)}));
+                state = { ...state, ...parsedState };
+            }
+        }
+
+        // --- DOM ELEMENTS ---
+        const mainContent = document.getElementById('main-content');
+        const modalContainer = document.getElementById('modal-container');
+        const mainNav = document.getElementById('main-nav');
+        
+        // --- DATE HELPERS ---
+        const isToday = (date) => {
+            const today = new Date();
+            return date.getDate() === today.getDate() && date.getMonth() === today.getMonth() && date.getFullYear() === today.getFullYear();
+        };
+        const isSameDay = (d1, d2) => d1.getFullYear() === d2.getFullYear() && d1.getMonth() === d2.getMonth() && d1.getDate() === d2.getDate();
+        const formatDateForGoogle = (date) => date.toISOString().replace(/-|:|\.\d{3}/g, '');
+        const formatICSDate = (date) => date.toISOString().replace(/-|:|\.\d{3}/g, '').slice(0, 15) + 'Z';
+
+        // --- RENDER FUNCTIONS ---
+        function render() {
+            switch (state.currentView) {
+                case 'agenda': renderAgendaView(); break;
+                case 'clientes': renderClientManager(); break;
+                case 'operadores': renderOperatorManager(); break;
+            }
+        }
+
+        // --- AGENDA VIEW ---
+        function renderAgendaView() {
+            const headerHTML = `
+                <div class="flex items-center justify-between mb-4 px-2 flex-wrap gap-4">
+                     <div class="flex items-center gap-2">
+                        <button data-action="export-agenda-csv" class="flex items-center bg-blue-600 text-white font-bold py-2 px-3 rounded-lg hover:bg-blue-700 transition duration-300 text-sm"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg> Exportar (CSV)</button>
+                        <button data-action="export-agenda-ics" class="flex items-center bg-purple-600 text-white font-bold py-2 px-3 rounded-lg hover:bg-purple-700 transition duration-300 text-sm"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg> Exportar a Calendario</button>
+                    </div>
+                    <div class="flex items-center space-x-1">
+                        <button data-action="prev-period" class="p-2 rounded-md hover:bg-gray-100 text-gray-600">&lt;</button>
+                        <button data-action="today" class="px-3 py-1.5 rounded-md text-sm font-semibold border border-gray-300 hover:bg-gray-100 text-gray-700">Hoy</button>
+                        <button data-action="next-period" class="p-2 rounded-md hover:bg-gray-100 text-gray-600">&gt;</button>
+                    </div>
+                    <div class="flex items-center space-x-1 border border-gray-300 rounded-lg p-0.5">
+                        <button data-calendar-view="day" class="calendar-view-btn px-2 py-1 text-sm rounded-md ${state.calendarView === 'day' ? 'bg-indigo-600 text-white' : 'text-gray-600'}">Día</button>
+                        <button data-calendar-view="week" class="calendar-view-btn px-2 py-1 text-sm rounded-md ${state.calendarView === 'week' ? 'bg-indigo-600 text-white' : 'text-gray-600'}">Semana</button>
+                        <button data-calendar-view="month" class="calendar-view-btn px-2 py-1 text-sm rounded-md ${state.calendarView === 'month' ? 'bg-indigo-600 text-white' : 'text-gray-600'}">Mes</button>
+                    </div>
+                </div>`;
+            
+            let calendarHTML = '';
+            if (state.calendarView === 'day') {
+                calendarHTML = renderDayView();
+            } else if (state.calendarView === 'week') {
+                calendarHTML = renderWeekView();
+            } else {
+                calendarHTML = renderMonthView();
+            }
+            
+            mainContent.innerHTML = `<div class="bg-white p-4 sm:p-6 rounded-xl shadow-lg">${headerHTML}${calendarHTML}</div>`;
+        }
+
+        function renderDayView() {
+            const day = state.currentDate;
+            const dayEvents = state.events.filter(e => isSameDay(e.start, day));
+            const todayClass = isToday(day) ? 'is-today' : '';
+            return `
+                <div class="grid grid-cols-1 gap-px bg-gray-200 border border-gray-200">
+                    <div class="bg-gray-50 p-2 flex flex-col min-h-[60vh] ${todayClass}">
+                        <div class="text-center mb-2">
+                            <p class="font-semibold text-gray-700 text-sm">${day.toLocaleDateString('es-ES', { weekday: 'long' })}</p>
+                            <p class="date-number font-bold text-2xl">${day.getDate()}</p>
+                        </div>
+                        <div class="flex-grow space-y-3 overflow-y-auto bg-white p-3 rounded-md day-column">
+                            ${dayEvents.length > 0 ? dayEvents.map(renderEventCard).join('') : `<p class="text-center text-gray-500 mt-10">No hay eventos programados.</p>`}
+                        </div>
+                        <button data-action="add-event" data-date="${day.toISOString()}" class="mt-2 w-full text-center text-indigo-600 hover:text-indigo-800 text-sm font-semibold p-1 rounded-md hover:bg-indigo-50 transition-colors">+ Agregar</button>
+                    </div>
+                </div>`;
+        }
+
+        function renderWeekView() {
+            const startOfWeek = new Date(state.currentDate);
+            const day = startOfWeek.getDay();
+            const diff = startOfWeek.getDate() - day + (day === 0 ? -6 : 1);
+            startOfWeek.setDate(diff);
+            
+            let weekHTML = '';
+            for (let i = 0; i < 6; i++) {
+                const day = new Date(startOfWeek);
+                day.setDate(startOfWeek.getDate() + i);
+                const dayEvents = state.events.filter(e => isSameDay(e.start, day));
+                const todayClass = isToday(day) ? 'is-today' : '';
+                weekHTML += `
+                    <div class="bg-gray-50 p-2 min-h-[500px] flex flex-col ${todayClass}">
+                        <div class="text-center mb-2">
+                            <p class="font-semibold text-gray-700 text-sm">${day.toLocaleDateString('es-ES', { weekday: 'long' })}</p>
+                            <p class="date-number font-bold text-lg">${day.getDate()}</p>
+                        </div>
+                        <div class="flex-grow space-y-2 overflow-y-auto bg-white p-2 rounded-md day-column">
+                             ${dayEvents.length > 0 ? dayEvents.map(renderEventCard).join('') : ''}
+                        </div>
+                        <button data-action="add-event" data-date="${day.toISOString()}" class="mt-2 w-full text-center text-indigo-600 hover:text-indigo-800 text-sm font-semibold p-1 rounded-md hover:bg-indigo-50 transition-colors">+ Agregar</button>
+                    </div>`;
+            }
+            return `<div class="grid grid-cols-1 md:grid-cols-6 gap-px bg-gray-200 border border-gray-200">${weekHTML}</div>`;
+        }
+        
+        function renderMonthView() {
+            const date = state.currentDate;
+            const year = date.getFullYear();
+            const month = date.getMonth();
+            const firstDay = new Date(year, month, 1);
+            const lastDay = new Date(year, month + 1, 0);
+            const daysInMonth = lastDay.getDate();
+            let startDayOfWeek = firstDay.getDay(); // 0=Sun, 1=Mon
+            if (startDayOfWeek === 0) startDayOfWeek = 7; // Make Sunday 7
+            
+            let monthHTML = '<div class="grid grid-cols-7 gap-px text-center text-xs font-bold uppercase text-gray-500 py-2"><div class="py-2">Lu</div><div class="py-2">Ma</div><div class="py-2">Mi</div><div class="py-2">Ju</div><div class="py-2">Vi</div><div class="py-2">Sa</div><div class="py-2">Do</div></div>';
+            monthHTML += `<div class="grid grid-cols-7 gap-px bg-gray-200 border border-gray-200">`;
+            
+            for (let i = 1; i < startDayOfWeek; i++) {
+                monthHTML += `<div class="bg-gray-50"></div>`; // Empty cells
+            }
+            
+            for (let i = 1; i <= daysInMonth; i++) {
+                const dayDate = new Date(year, month, i);
+                const dayEvents = state.events.filter(e => isSameDay(e.start, dayDate));
+                 const todayClass = isToday(dayDate) ? 'is-today' : 'bg-white';
+                monthHTML += `
+                    <div class="${todayClass} p-1 min-h-[120px] flex flex-col text-sm">
+                        <span class="font-semibold">${i}</span>
+                        <div class="flex-grow overflow-y-auto text-left space-y-1 mt-1">
+                            ${dayEvents.map(e => `<div class="truncate text-xs p-1 rounded ${e.type === 'recoleccion' ? 'bg-blue-100 text-blue-800' : 'bg-green-100 text-green-800'}">${state.clients.find(c => c.id === e.clientId)?.name || ''}</div>`).join('')}
+                        </div>
+                        <button data-action="add-event" data-date="${dayDate.toISOString()}" class="text-indigo-500 text-lg font-bold">+</button>
+                    </div>`;
+            }
+            monthHTML += `</div>`;
+            return monthHTML;
+        }
+
+        function renderEventCard(event) {
+            const client = state.clients.find(c => c.id === event.clientId);
+            const operator = state.operators.find(o => o.id === event.operatorId);
+            const cardColor = event.type === 'recoleccion' ? 'border-l-4 border-blue-500' : 'border-l-4 border-green-500';
+
+            return `
+                <div class="p-3 rounded-lg shadow-sm ${cardColor} bg-white relative group text-sm">
+                    <div class="absolute top-2 right-2 flex flex-col items-center space-y-1 opacity-0 group-hover:opacity-100 transition-opacity z-10">
+                        ${client?.notes ? `<button data-action="show-notes" data-client-id="${client.id}" title="Ver notas del cliente" class="p-1 bg-white rounded-full text-gray-600 hover:bg-gray-200"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg></button>` : ''}
+                        <button data-action="add-to-calendar" data-event-id="${event.id}" title="Agregar a Google Calendar" class="p-1 bg-white rounded-full text-green-600 hover:bg-gray-200"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v-4m-2 2h4" /></svg></button>
+                        <button data-action="edit-event" data-event-id="${event.id}" title="Editar" class="p-1 bg-white rounded-full text-blue-600 hover:bg-gray-200"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.5L15.232 5.232z" /></svg></button>
+                        <button data-action="delete-event" data-event-id="${event.id}" title="Eliminar" class="p-1 bg-white rounded-full text-red-600 hover:bg-gray-200"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg></button>
+                    </div>
+                    
+                    <p><span class="font-bold">Tipo:</span> ${event.type === 'recoleccion' ? 'Recolección' : 'Entrega'}</p>
+                    <p><span class="font-bold">Para:</span> ${client?.name || 'Cliente no encontrado'}</p>
+                    <p><span class="font-bold">Transportista:</span> ${operator?.name || 'Sin asignar'}</p>
+                    ${event.material ? `<p><span class="font-bold">Material:</span> ${event.material}</p>` : ''}
+                    ${event.notes ? `<p class="mt-1 pt-1 border-t border-gray-200"><span class="font-bold">Nota:</span> <span class="text-gray-600 italic">${event.notes}</span></p>` : ''}
+                </div>`;
+        }
+
+        // --- CLIENT & OPERATOR MANAGERS ---
+        function renderCrudManager(title, iconSVG, tableHTML, templateHandler, importHandler) {
+             mainContent.innerHTML = `
+                <div class="bg-white p-6 rounded-xl shadow-lg">
+                    <div class="flex justify-between items-center mb-6 flex-wrap gap-4">
+                        <div class="flex items-center">
+                            ${iconSVG}
+                            <h2 class="text-2xl font-bold text-gray-700 ml-2">${title}</h2>
+                        </div>
+                         <div class="flex items-center gap-2">
+                            <button data-action="download-template" class="flex items-center bg-gray-600 text-white font-bold py-2 px-3 rounded-lg hover:bg-gray-700 transition duration-300 text-sm"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg> Plantilla</button>
+                            <button data-action="import-csv" class="flex items-center bg-green-600 text-white font-bold py-2 px-3 rounded-lg hover:bg-green-700 transition duration-300 text-sm"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg> Importar CSV</button>
+                            <input type="file" id="csv-file-input" class="hidden" accept=".csv" />
+                         </div>
+                    </div>
+                    <div class="overflow-x-auto">${tableHTML}</div>
+                </div>`;
+                document.querySelector('[data-action="download-template"]').onclick = templateHandler;
+                const fileInput = document.getElementById('csv-file-input');
+                document.querySelector('[data-action="import-csv"]').onclick = () => fileInput.click();
+                fileInput.onchange = importHandler;
+        }
+        
+        function renderClientManager() {
+            const tableHTML = `
+                <table class="min-w-full bg-white">
+                    <thead class="bg-gray-100">
+                        <tr>
+                            <th class="text-left py-3 px-4 uppercase font-semibold text-sm text-gray-600">Nombre</th>
+                            <th class="text-left py-3 px-4 uppercase font-semibold text-sm text-gray-600 hidden md:table-cell">Dirección</th>
+                            <th class="text-left py-3 px-4 uppercase font-semibold text-sm text-gray-600">Teléfono</th>
+                            <th class="text-left py-3 px-4 uppercase font-semibold text-sm text-gray-600">Acciones</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${state.clients.map(client => `
+                            <tr class="border-b hover:bg-gray-50">
+                                <td class="py-3 px-4">${client.name}</td>
+                                <td class="py-3 px-4 hidden md:table-cell">${client.address}</td>
+                                <td class="py-3 px-4">${client.phone}</td>
+                                <td class="py-3 px-4 flex space-x-2">
+                                    <button data-action="edit-client" data-id="${client.id}" class="text-blue-500 hover:text-blue-700"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.5L15.232 5.232z" /></svg></button>
+                                    <button data-action="delete-client" data-id="${client.id}" class="text-red-500 hover:text-red-700"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg></button>
+                                </td>
+                            </tr>`).join('') || `<tr><td colspan="4" class="text-center text-gray-500 py-8">No hay clientes registrados.</td></tr>`}
+                    </tbody>
+                </table>`;
+            renderCrudManager('Gestión de Clientes', `<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-indigo-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M15 21a6 6 0 00-9-5.197m0 0A5.975 5.975 0 0112 13a5.975 5.975 0 014.5 2.803M15 21a9 9 0 00-9-9" /></svg>`, tableHTML, handleDownloadClientTemplate, handleImportClients);
+        }
+
+        function renderOperatorManager() {
+             const tableHTML = `
+                <table class="min-w-full bg-white">
+                    <thead class="bg-gray-100">
+                        <tr>
+                            <th class="text-left py-3 px-4 uppercase font-semibold text-sm text-gray-600">Nombre</th>
+                            <th class="text-left py-3 px-4 uppercase font-semibold text-sm text-gray-600">Teléfono</th>
+                            <th class="text-left py-3 px-4 uppercase font-semibold text-sm text-gray-600 hidden sm:table-cell">Placa Vehículo</th>
+                            <th class="text-left py-3 px-4 uppercase font-semibold text-sm text-gray-600">Estatus</th>
+                            <th class="text-left py-3 px-4 uppercase font-semibold text-sm text-gray-600">Acciones</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${state.operators.map(op => `
+                            <tr class="border-b hover:bg-gray-50">
+                                <td class="py-3 px-4">${op.name}</td>
+                                <td class="py-3 px-4">${op.phone}</td>
+                                <td class="py-3 px-4 hidden sm:table-cell">${op.vehiclePlate || 'N/A'}</td>
+                                <td class="py-3 px-4"><span class="px-2 py-1 text-xs font-semibold rounded-full ${op.status === 'activo' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}">${op.status}</span></td>
+                                <td class="py-3 px-4 flex space-x-2">
+                                    <button data-action="edit-operator" data-id="${op.id}" class="text-blue-500 hover:text-blue-700"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.5L15.232 5.232z" /></svg></button>
+                                    <button data-action="delete-operator" data-id="${op.id}" class="text-red-500 hover:text-red-700"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg></button>
+                                </td>
+                            </tr>`).join('') || `<tr><td colspan="5" class="text-center text-gray-500 py-8">No hay operadores registrados.</td></tr>`}
+                    </tbody>
+                </table>`;
+            renderCrudManager('Gestión de Operadores', `<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-indigo-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path d="M9 17a2 2 0 11-4 0 2 2 0 014 0zM19 17a2 2 0 11-4 0 2 2 0 014 0z" /><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16V6a1 1 0 00-1-1H4a1 1 0 00-1 1v10l2 2h8a1 1 0 001-1z" /><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h2a1 1 0 001-1V7a1 1 0 00-1-1h-2" /></svg>`, tableHTML, handleDownloadOperatorTemplate, handleImportOperators);
+        }
+
+        // --- MODAL & FORM RENDERING ---
+        function renderModal(title, content, formId) {
+            modalContainer.innerHTML = `
+                <div class="fixed inset-0 bg-black bg-opacity-60 z-50 flex justify-center items-center p-4 modal">
+                    <div class="bg-white rounded-lg shadow-2xl w-full max-w-lg max-h-[90vh] flex flex-col">
+                        <div class="flex justify-between items-center p-4 border-b">
+                            <h3 class="text-xl font-semibold text-gray-800">${title}</h3>
+                            <button data-action="close-modal" class="text-gray-400 hover:text-gray-600"><svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg></button>
+                        </div>
+                        <div class="p-6 overflow-y-auto">${formId ? `<form id="${formId}">${content}</form>` : content}</div>
+                    </div>
+                </div>`;
+        }
+        
+        function renderClientForm(client = {}) {
+            state.editingItem = client;
+            const content = `
+                <div class="space-y-4">
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Nombre Completo</label><input name="name" class="w-full px-3 py-2 border border-gray-300 rounded-md" value="${client.name || ''}" required></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Dirección</label><input name="address" class="w-full px-3 py-2 border border-gray-300 rounded-md" value="${client.address || ''}" required></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Teléfono</label><input name="phone" type="tel" class="w-full px-3 py-2 border border-gray-300 rounded-md" value="${client.phone || ''}" required></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Correo Electrónico (Opcional)</label><input name="email" type="email" class="w-full px-3 py-2 border border-gray-300 rounded-md" value="${client.email || ''}"></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Notas</label><textarea name="notes" rows="3" class="w-full px-3 py-2 border border-gray-300 rounded-md">${client.notes || ''}</textarea></div>
+                    <div class="flex justify-end space-x-3 pt-4">
+                        <button type="button" data-action="close-modal" class="bg-gray-200 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-300">Cancelar</button>
+                        <button type="submit" class="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700">Guardar Cliente</button>
+                    </div>
+                </div>`;
+            renderModal(client.id ? "Editar Cliente" : "Nuevo Cliente", content, 'client-form');
+        }
+
+        function renderOperatorForm(operator = {}) {
+            state.editingItem = operator;
+            const content = `
+                <div class="space-y-4">
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Nombre Completo</label><input name="name" class="w-full px-3 py-2 border border-gray-300 rounded-md" value="${operator.name || ''}" required></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Teléfono</label><input name="phone" type="tel" class="w-full px-3 py-2 border border-gray-300 rounded-md" value="${operator.phone || ''}" required></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Placa del Vehículo</label><input name="vehiclePlate" class="w-full px-3 py-2 border border-gray-300 rounded-md" value="${operator.vehiclePlate || ''}"></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Estatus</label>
+                        <select name="status" class="w-full px-3 py-2 border border-gray-300 rounded-md">
+                            <option value="activo" ${operator.status === 'activo' ? 'selected' : ''}>Activo</option>
+                            <option value="inactivo" ${operator.status === 'inactivo' ? 'selected' : ''}>Inactivo</option>
+                        </select>
+                    </div>
+                    <div class="flex justify-end space-x-3 pt-4">
+                        <button type="button" data-action="close-modal" class="bg-gray-200 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-300">Cancelar</button>
+                        <button type="submit" class="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700">Guardar Operador</button>
+                    </div>
+                </div>`;
+            renderModal(operator.id ? "Editar Operador" : "Nuevo Operador", content, 'operator-form');
+        }
+        
+        function renderEventForm(event = {}, date) {
+             state.editingItem = event;
+             const targetDate = event.start || date || new Date();
+             const d = new Date(targetDate);
+             if (!event.start) d.setHours(9, 0, 0, 0);
+             const dateString = d.toISOString().substring(0, 16);
+
+             const content = `
+                 <div class="space-y-4">
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Tipo de Operación</label>
+                        <select name="type" class="w-full px-3 py-2 border border-gray-300 rounded-md">
+                            <option value="recoleccion" ${event.type === 'recoleccion' ? 'selected' : ''}>Recolección</option>
+                            <option value="entrega" ${event.type === 'entrega' ? 'selected' : ''}>Entrega</option>
+                        </select>
+                    </div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Cliente</label>
+                        <select name="clientId" class="w-full px-3 py-2 border border-gray-300 rounded-md" required>
+                            <option value="" disabled selected>Seleccione un cliente</option>
+                            ${state.clients.map(c => `<option value="${c.id}" ${event.clientId === c.id ? 'selected' : ''}>${c.name}</option>`).join('')}
+                        </select>
+                    </div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Operador Asignado</label>
+                        <select name="operatorId" class="w-full px-3 py-2 border border-gray-300 rounded-md">
+                            <option value="">Sin asignar</option>
+                             ${state.operators.filter(o => o.status === 'activo').map(o => `<option value="${o.id}" ${event.operatorId === o.id ? 'selected' : ''}>${o.name}</option>`).join('')}
+                        </select>
+                    </div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Fecha y Hora</label><input name="start" type="datetime-local" class="w-full px-3 py-2 border border-gray-300 rounded-md" value="${dateString}" required></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Material Estimado</label><input name="material" class="w-full px-3 py-2 border border-gray-300 rounded-md" value="${event.material || ''}"></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Notas del Evento</label><textarea name="notes" rows="3" class="w-full px-3 py-2 border border-gray-300 rounded-md">${event.notes || ''}</textarea></div>
+                    <div class="flex justify-end space-x-3 pt-4">
+                        <button type="button" data-action="close-modal" class="bg-gray-200 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-300">Cancelar</button>
+                        <button type="submit" class="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700">Guardar Evento</button>
+                    </div>
+                 </div>`;
+            renderModal(event.id ? "Editar Evento" : "Nuevo Evento", content, 'event-form');
+        }
+
+        function renderNotesModal(title, content) {
+            const modalContent = `
+                <div class="text-sm text-gray-700 whitespace-pre-wrap break-words min-h-[100px]">${content}</div>
+                <div class="mt-6 flex justify-end">
+                    <button type="button" data-action="close-modal" class="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700">Cerrar</button>
+                </div>`;
+            renderModal(title, modalContent);
+        }
+
+        // --- CSV & ICS Handlers ---
+        function downloadFile(filename, content, mimeType) {
+            const link = document.createElement("a");
+            const file = new Blob([content], { type: mimeType });
+            link.href = URL.createObjectURL(file);
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+
+        function handleDownloadClientTemplate() {
+            downloadFile("plantilla_clientes.csv", "nombre,direccion,telefono,email,notas\n", "text/csv;charset=utf-8;");
+        }
+        function handleDownloadOperatorTemplate() {
+            downloadFile("plantilla_operadores.csv", "nombre,telefono,placa_vehiculo\n", "text/csv;charset=utf-8;");
+        }
+
+        const createImportHandler = (dataType) => (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = async (event) => {
+                const text = event.target.result;
+                const rows = text.split('\n').slice(1).filter(row => row.trim() !== '');
+                
+                try {
+                    if (dataType === 'clients') {
+                         rows.forEach(row => {
+                            const cols = row.split(',');
+                            if (cols[0]?.trim()) {
+                                state.clients.push({ id: `local_${Date.now()}_${Math.random()}`, name: cols[0]?.trim(), address: cols[1]?.trim(), phone: cols[2]?.trim(), email: cols[3]?.trim(), notes: cols[4]?.trim() });
+                            }
+                        });
+                    } else if (dataType === 'operators') {
+                        rows.forEach(row => {
+                            const cols = row.split(',');
+                            if (cols[0]?.trim()) {
+                                state.operators.push({ id: `local_${Date.now()}_${Math.random()}`, name: cols[0]?.trim(), phone: cols[1]?.trim(), vehiclePlate: cols[2]?.trim(), status: 'activo' });
+                            }
+                        });
+                    }
+                    saveState();
+                    render();
+                    alert(`${rows.length} registros importados exitosamente.`);
+                } catch(err) {
+                    alert("Ocurrió un error durante la importación.");
+                    console.error(err);
+                }
+            };
+            reader.readAsText(file);
+            e.target.value = '';
+        };
+
+        const handleImportClients = createImportHandler('clients');
+        const handleImportOperators = createImportHandler('operators');
+        
+        // --- EVENT LISTENERS ---
+        document.body.addEventListener('click', async e => {
+            const targetElement = e.target.closest('[data-action]') || e.target.closest('[data-view]') || e.target.closest('[data-calendar-view]');
+            if (!targetElement) return;
+
+            let action = targetElement.dataset.action;
+            const view = targetElement.dataset.view;
+            const calendarView = targetElement.dataset.calendarView;
+
+            // Navigation
+            if(view) {
+                 state.currentView = view;
+                 document.querySelectorAll('.nav-btn').forEach(btn => {
+                     btn.classList.remove('bg-indigo-600', 'text-white');
+                     btn.classList.add('text-gray-600', 'hover:bg-gray-200');
+                 });
+                 targetElement.classList.add('bg-indigo-600', 'text-white');
+                 targetElement.classList.remove('text-gray-600', 'hover:bg-gray-200');
+                 render();
+                 return;
+            }
+
+            // Calendar View Change
+            if(calendarView) {
+                state.calendarView = calendarView;
+                renderAgendaView();
+                return;
+            }
+
+            if (!action) return;
+            
+            // Modals
+            if (action === 'close-modal') {
+                 modalContainer.innerHTML = '';
+                 state.editingItem = null;
+                 return;
+            }
+            
+            // Agenda Actions
+            const agendaNavActions = ['prev-period', 'next-period', 'today'];
+            if(agendaNavActions.includes(action)) {
+                 if (action === 'prev-period') {
+                    if(state.calendarView === 'day') state.currentDate.setDate(state.currentDate.getDate() - 1);
+                    if(state.calendarView === 'week') state.currentDate.setDate(state.currentDate.getDate() - 7);
+                    if(state.calendarView === 'month') state.currentDate.setMonth(state.currentDate.getMonth() - 1);
+                 }
+                 if (action === 'next-period') {
+                    if(state.calendarView === 'day') state.currentDate.setDate(state.currentDate.getDate() + 1);
+                    if(state.calendarView === 'week') state.currentDate.setDate(state.currentDate.getDate() + 7);
+                    if(state.calendarView === 'month') state.currentDate.setMonth(state.currentDate.getMonth() + 1);
+                 }
+                 if (action === 'today') state.currentDate = new Date();
+                 renderAgendaView();
+            }
+
+            if (action === 'add-event') renderEventForm({}, new Date(targetElement.dataset.date));
+            if (action === 'edit-event') renderEventForm(state.events.find(ev => ev.id === targetElement.dataset.eventId));
+            if (action === 'delete-event' && confirm('¿Estás seguro?')) {
+                state.events = state.events.filter(ev => ev.id !== targetElement.dataset.eventId);
+                saveState();
+                render();
+            }
+            if (action === 'add-to-calendar') {
+                const event = state.events.find(ev => ev.id === targetElement.dataset.eventId);
+                const client = state.clients.find(c => c.id === event.clientId);
+                const operator = state.operators.find(o => o.id === event.operatorId);
+                const startTime = event.start;
+                const endTime = new Date(startTime.getTime() + 60 * 60 * 1000);
+                let details = `Operador: ${operator?.name || 'No asignado'}\nMaterial: ${event.material || 'No especificado'}\n`;
+                if (event.notes) details += `Notas del Evento: ${event.notes}\n`;
+                if (client.notes) details += `\n--- NOTAS DEL CLIENTE ---\n${client.notes}`;
+                window.open(`https://www.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(`${event.type === 'recoleccion' ? 'Recolección' : 'Entrega'}: ${client.name}`)}&dates=${formatDateForGoogle(startTime)}/${formatDateForGoogle(endTime)}&details=${encodeURIComponent(details)}&location=${encodeURIComponent(client.address)}`, '_blank');
+            }
+             if(action === 'show-notes') {
+                const client = state.clients.find(c => c.id === targetElement.dataset.clientId);
+                renderNotesModal(`Notas para ${client.name}`, client.notes);
+            }
+            
+            // CRUD Actions
+            if (action === 'edit-client') renderClientForm(state.clients.find(c => c.id === targetElement.dataset.id));
+            if (action === 'delete-client' && confirm('¿Estás seguro?')) {
+                 state.clients = state.clients.filter(c => c.id !== targetElement.dataset.id);
+                 saveState();
+                 render();
+            }
+
+            if (action === 'edit-operator') renderOperatorForm(state.operators.find(o => o.id === targetElement.dataset.id));
+            if (action === 'delete-operator' && confirm('¿Estás seguro?')) {
+                state.operators = state.operators.filter(o => o.id !== targetElement.dataset.id);
+                saveState();
+                render();
+            }
+            
+            // Agenda Export/Import
+            if (action === 'export-agenda-csv') {
+                let csvContent = "Fecha,Hora,Tipo,Cliente,Operador,Material,Notas\n";
+                state.events.forEach(event => {
+                    const client = state.clients.find(c => c.id === event.clientId) || {};
+                    const operator = state.operators.find(o => o.id === event.operatorId) || {};
+                    const row = [
+                        event.start.toLocaleDateString('es-ES'),
+                        event.start.toLocaleTimeString('es-ES'),
+                        event.type,
+                        `"${client.name || ''}"`,
+                        `"${operator.name || ''}"`,
+                        `"${event.material || ''}"`,
+                        `"${event.notes || ''}"`
+                    ].join(',');
+                    csvContent += row + '\n';
+                });
+                downloadFile('agenda_completa.csv', csvContent, 'text/csv;charset=utf-8;');
+            }
+             if (action === 'export-agenda-ics') {
+                let icsContent = `BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//Adhal Cabrera//EcoAgenda//EN\n`;
+                state.events.forEach(event => {
+                    const client = state.clients.find(c => c.id === event.clientId) || {};
+                    const operator = state.operators.find(o => o.id === event.operatorId) || {};
+                    const startTime = event.start;
+                    const endTime = new Date(startTime.getTime() + 60 * 60 * 1000);
+                    let description = `Operador: ${operator?.name || 'No asignado'}\\nMaterial: ${event.material || 'No especificado'}\\n`;
+                     if (event.notes) description += `Notas del Evento: ${event.notes}\\n`;
+                    if (client.notes) description += `\\n--- NOTAS DEL CLIENTE ---\\n${client.notes}`;
+
+                    icsContent += 'BEGIN:VEVENT\n';
+                    icsContent += `UID:${event.id}@ecoagenda.com\n`;
+                    icsContent += `DTSTAMP:${formatICSDate(new Date())}\n`;
+                    icsContent += `DTSTART:${formatICSDate(startTime)}\n`;
+                    icsContent += `DTEND:${formatICSDate(endTime)}\n`;
+                    icsContent += `SUMMARY:${event.type === 'recoleccion' ? 'Recolección' : 'Entrega'}: ${client.name}\n`;
+                    icsContent += `DESCRIPTION:${description}\n`;
+                    icsContent += `LOCATION:${client.address || ''}\n`;
+                    icsContent += 'END:VEVENT\n';
+                });
+                icsContent += 'END:VCALENDAR';
+                downloadFile('EcoAgenda.ics', icsContent, 'text/calendar');
+            }
+
+        });
+        
+        document.getElementById('add-new-btn-floating').onclick = () => {
+            state.editingItem = null;
+            if (state.currentView === 'agenda') renderEventForm({}, state.currentDate);
+            if (state.currentView === 'clientes') renderClientForm();
+            if (state.currentView === 'operadores') renderOperatorForm();
+        };
+
+        modalContainer.addEventListener('submit', async e => {
+            e.preventDefault();
+            const formData = new FormData(e.target);
+            const data = Object.fromEntries(formData.entries());
+            const id = state.editingItem?.id;
+
+            if (e.target.id === 'client-form') {
+                if(id) state.clients = state.clients.map(c => c.id === id ? { ...c, ...data } : c);
+                else state.clients.push({ id: `local_${Date.now()}`, ...data });
+            } else if (e.target.id === 'operator-form') {
+                if(id) state.operators = state.operators.map(o => o.id === id ? { ...o, ...data } : o);
+                else state.operators.push({ id: `local_${Date.now()}`, ...data, status: 'activo' });
+            } else if (e.target.id === 'event-form') {
+                const eventData = { ...data, start: new Date(data.start) };
+                 if(id) state.events = state.events.map(ev => ev.id === id ? { ...ev, ...eventData } : ev);
+                 else state.events.push({ id: `local_${Date.now()}`, ...eventData });
+            }
+
+            saveState();
+            render();
+            modalContainer.innerHTML = '';
+            state.editingItem = null;
+        });
+
+        // Initial Load
+        loadState();
+        render();
+
+    </script>
+</body>
+</html>
