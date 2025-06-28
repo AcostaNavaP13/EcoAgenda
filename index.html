@@ -8,6 +8,11 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700;900&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0"></script>
+
+
     <style>
         /* Custom styles for better UX */
         body {
@@ -29,10 +34,10 @@
             to { opacity: 1; transform: scale(1); }
         }
         /* Custom scrollbar */
-        .day-column::-webkit-scrollbar { width: 8px; }
-        .day-column::-webkit-scrollbar-track { background: #f1f5f9; }
-        .day-column::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
-        .day-column::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        .day-column::-webkit-scrollbar, .table-container::-webkit-scrollbar { width: 8px; }
+        .day-column::-webkit-scrollbar-track, .table-container::-webkit-scrollbar-track { background: #f1f5f9; }
+        .day-column::-webkit-scrollbar-thumb, .table-container::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        .day-column::-webkit-scrollbar-thumb:hover, .table-container::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
         
         .is-today {
             background-color: #eef2ff !important; /* Indigo 50 */
@@ -104,8 +109,8 @@
                    
                     <nav id="main-nav" class="flex space-x-2 sm:space-x-4">
                         <button data-view="agenda" class="nav-btn px-3 py-2 rounded-md text-sm font-medium bg-indigo-600 text-white">Agenda</button>
-                        <button data-view="clientes" class="nav-btn px-3 py-2 rounded-md text-sm font-medium text-gray-600 hover:bg-gray-200">Clientes</button>
-                        <button data-view="operadores" class="nav-btn px-3 py-2 rounded-md text-sm font-medium text-gray-600 hover:bg-gray-200">Operadores</button>
+                        <button data-view="gestion" class="nav-btn px-3 py-2 rounded-md text-sm font-medium text-gray-600 hover:bg-gray-200">Gestión</button>
+                        <button data-view="reportes" class="nav-btn px-3 py-2 rounded-md text-sm font-medium text-gray-600 hover:bg-gray-200">Reportes</button>
                     </nav>
                 </div>
             </div>
@@ -130,17 +135,27 @@
 
     <!-- Main Application Logic -->
     <script>
+    window.addEventListener('DOMContentLoaded', () => {
         // --- STATE MANAGEMENT ---
         let state = {
             currentView: 'agenda',
-            calendarView: 'week', // 'day', 'week', 'month'
+            gestionView: 'clientes', // 'clientes' or 'operadores'
+            calendarView: 'week',
             currentDate: new Date(),
             clients: [],
             operators: [],
             events: [],
             editingItem: null,
+            // --- NEW: Report state ---
+            reportDateRange: 'last7days',
+            reportCustomStartDate: '',
+            reportCustomEndDate: '',
+            reportTablePage: 1,
+            reportTableRowsPerPage: 10,
         };
         
+        let activeCharts = {}; // To keep track of active chart instances
+
         // --- LOCAL STORAGE ---
         function saveState() {
             localStorage.setItem('ecoAgendaState', JSON.stringify(state));
@@ -152,6 +167,7 @@
                 const parsedState = JSON.parse(savedState);
                 parsedState.currentDate = new Date(parsedState.currentDate);
                 parsedState.events = parsedState.events.map(e => ({...e, start: new Date(e.start)}));
+                // Make sure new state properties have default values
                 state = { ...state, ...parsedState };
             }
         }
@@ -169,6 +185,15 @@
         const isSameDay = (d1, d2) => d1.getFullYear() === d2.getFullYear() && d1.getMonth() === d2.getMonth() && d1.getDate() === d2.getDate();
         const formatDateForGoogle = (date) => date.toISOString().replace(/-|:|\.\d{3}/g, '');
         const formatICSDate = (date) => date.toISOString().replace(/-|:|\.\d{3}/g, '').slice(0, 15) + 'Z';
+        const formatDateForInput = (date) => {
+             if (!date || isNaN(new Date(date))) return '';
+             const d = new Date(date);
+             const year = d.getFullYear();
+             const month = (d.getMonth() + 1).toString().padStart(2, '0');
+             const day = d.getDate().toString().padStart(2, '0');
+             return `${year}-${month}-${day}`;
+        };
+
 
         // --- UI & NOTIFICATION HELPERS ---
         function showToast(message, type = 'success') {
@@ -185,10 +210,14 @@
 
         // --- RENDER FUNCTIONS ---
         function render() {
+             // Destroy previous charts before re-rendering
+            Object.values(activeCharts).forEach(chart => chart.destroy());
+            activeCharts = {};
+
             switch (state.currentView) {
                 case 'agenda': renderAgendaView(); break;
-                case 'clientes': renderClientManager(); break;
-                case 'operadores': renderOperatorManager(); break;
+                case 'gestion': renderGestionView(); break;
+                case 'reportes': renderReportsView(); break;
             }
         }
 
@@ -341,8 +370,42 @@
                 </div>`;
         }
 
+        function renderGestionView() {
+            mainContent.innerHTML = `
+                <div>
+                    <div class="sm:hidden">
+                        <label for="tabs" class="sr-only">Select a tab</label>
+                        <select id="tabs" name="tabs" class="block w-full focus:ring-indigo-500 focus:border-indigo-500 border-gray-300 rounded-md">
+                            <option ${state.gestionView === 'clientes' ? 'selected' : ''} value="clientes">Clientes</option>
+                            <option ${state.gestionView === 'operadores' ? 'selected' : ''} value="operadores">Operadores</option>
+                        </select>
+                    </div>
+                    <div class="hidden sm:block">
+                        <div class="border-b border-gray-200">
+                            <nav class="-mb-px flex space-x-8" aria-label="Tabs">
+                                <button data-gestion-view="clientes" class="${state.gestionView === 'clientes' ? 'border-indigo-500 text-indigo-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'} whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">
+                                    Clientes
+                                </button>
+                                <button data-gestion-view="operadores" class="${state.gestionView === 'operadores' ? 'border-indigo-500 text-indigo-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'} whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">
+                                    Operadores
+                                </button>
+                            </nav>
+                        </div>
+                    </div>
+                </div>
+                <div id="gestion-content" class="mt-6"></div>
+            `;
+            
+            if(state.gestionView === 'clientes') {
+                renderClientManager();
+            } else {
+                renderOperatorManager();
+            }
+        }
+        
         function renderCrudManager(title, iconSVG, tableHTML, templateHandler, importHandler) {
-             mainContent.innerHTML = `
+             const gestionContent = document.getElementById('gestion-content');
+             gestionContent.innerHTML = `
                 <div class="bg-white p-6 rounded-xl shadow-lg">
                     <div class="flex justify-between items-center mb-6 flex-wrap gap-4">
                         <div class="flex items-center">
@@ -354,13 +417,13 @@
                             <button data-action="import-csv" class="flex items-center bg-green-600 text-white font-bold py-2 px-3 rounded-lg hover:bg-green-700 transition duration-300 text-sm"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg> Importar CSV</button>
                          </div>
                     </div>
-                    <div class="overflow-x-auto">${tableHTML}</div>
+                    <div class="overflow-x-auto table-container">${tableHTML}</div>
                 </div>`;
             
             const importInputId = title.includes('Clientes') ? 'import-clients-input' : 'import-operators-input';
-            document.querySelector('[data-action="download-template"]').onclick = templateHandler;
+            gestionContent.querySelector('[data-action="download-template"]').onclick = templateHandler;
             const fileInput = document.getElementById(importInputId);
-            document.querySelector('[data-action="import-csv"]').onclick = () => {
+            gestionContent.querySelector('[data-action="import-csv"]').onclick = () => {
                 renderConfirmModal('Confirmar Importación', 'Asegúrate de que el archivo CSV tenga el formato correcto. Las columnas deben coincidir con la plantilla.', () => {
                      fileInput.click();
                 });
@@ -540,7 +603,7 @@
         // --- CSV & ICS Handlers ---
         function downloadFile(filename, content, mimeType) {
             const link = document.createElement("a");
-            const file = new Blob([content], { type: mimeType });
+            const file = new Blob([`\uFEFF${content}`], { type: `${mimeType};charset=utf-8;` }); // Add BOM for Excel
             link.href = URL.createObjectURL(file);
             link.download = filename;
             document.body.appendChild(link);
@@ -554,7 +617,7 @@
                 ['Cliente Ejemplo', 'Calle Falsa 123', '5511223344', 'cliente@email.com', 'Notas para el cliente']
             ];
             const csvContent = content.map(row => `"${row.join('","')}"`).join('\n') + '\n';
-            downloadFile("plantilla_clientes.csv", csvContent, "text/csv;charset=utf-8;");
+            downloadFile("plantilla_clientes.csv", csvContent, "text/csv");
         }
         function handleDownloadOperatorTemplate() {
              const content = [
@@ -562,15 +625,15 @@
                 ['Operador Ejemplo', '5599887766', 'XYZ-567']
             ];
             const csvContent = content.map(row => `"${row.join('","')}"`).join('\n') + '\n';
-            downloadFile("plantilla_operadores.csv", csvContent, "text/csv;charset=utf-8;");
+            downloadFile("plantilla_operadores.csv", csvContent, "text/csv");
         }
         function handleDownloadGeneralTemplate() {
             const content = [
-                ['FECHA (DD/MM/AAAA)','HORA (HH:MM)','TIPO','CLIENTE_NOMBRE','CLIENTE_DIRECCION','CLIENTE_TELEFONO','CLIENTE_EMAIL','CLIENTE_NOTAS','OPERADOR_NOMBRE','OPERADOR_TELEFONO','OPERADOR_PLACA','MATERIAL','NOTAS_EVENTO'],
+                ['FECHA','HORA','TIPO','CLIENTE_NOMBRE','CLIENTE_DIRECCION','CLIENTE_TELEFONO','CLIENTE_EMAIL','CLIENTE_NOTAS','OPERADOR_NOMBRE','OPERADOR_TELEFONO','OPERADOR_PLACA','MATERIAL','NOTAS_EVENTO'],
                 ['28/06/2025','14:30','recoleccion','Cliente General Ejemplo','Avenida Siempreviva 742','5512345678','cliente@ejemplo.com','Notas del cliente','Operador General Ejemplo','5599887766','ABC-123','PET y Cartón','Llamar al llegar.']
             ];
             const csvContent = content.map(row => `"${row.join('","')}"`).join('\n') + '\n';
-            downloadFile("plantilla_general.csv", csvContent, "text/csv;charset=utf-8;");
+            downloadFile("plantilla_general.csv", csvContent, "text/csv");
         }
         
         // --- DATA IMPORT HANDLERS ---
@@ -722,10 +785,372 @@
             reader.readAsText(file, 'UTF-8');
             e.target.value = '';
         }
+
+        // --- Reports View (IMPROVED) ---
+        function getFilteredReportEvents() {
+            const now = new Date();
+            let startDate, endDate = new Date();
+
+            switch(state.reportDateRange) {
+                case 'last7days':
+                    startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6);
+                    break;
+                case 'last30days':
+                    startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 29);
+                    break;
+                case 'thisYear':
+                    startDate = new Date(now.getFullYear(), 0, 1);
+                    break;
+                case 'custom':
+                    startDate = state.reportCustomStartDate ? new Date(state.reportCustomStartDate + 'T00:00:00') : null;
+                    endDate = state.reportCustomEndDate ? new Date(state.reportCustomEndDate + 'T23:59:59') : null;
+                    if (!startDate || !endDate) return [];
+                    break;
+                default:
+                    startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+            }
+            
+            // Set time to beginning and end of day for accurate filtering
+            if (state.reportDateRange !== 'custom') {
+                startDate.setHours(0, 0, 0, 0);
+                endDate.setHours(23, 59, 59, 999);
+            }
+
+            return state.events.filter(event => {
+                const eventDate = new Date(event.start);
+                return eventDate >= startDate && eventDate <= endDate;
+            });
+        }
         
+        function renderReportsView() {
+            const filteredEvents = getFilteredReportEvents();
+            
+            mainContent.innerHTML = `
+                <div class="space-y-8">
+                    <!-- Header and Filters -->
+                    <div class="bg-white p-4 rounded-lg shadow-md">
+                         <div class="flex items-center justify-between flex-wrap gap-4">
+                            <h2 class="text-2xl font-bold text-gray-800">Panel de Reportes</h2>
+                            <div class="flex items-center gap-4 flex-wrap" id="reports-filter">
+                                <select id="date-range-selector" class="p-2 border border-gray-300 rounded-md bg-white text-sm">
+                                    <option value="last7days" ${state.reportDateRange === 'last7days' ? 'selected' : ''}>Últimos 7 días</option>
+                                    <option value="last30days" ${state.reportDateRange === 'last30days' ? 'selected' : ''}>Últimos 30 días</option>
+                                    <option value="thisYear" ${state.reportDateRange === 'thisYear' ? 'selected' : ''}>Este año</option>
+                                    <option value="custom" ${state.reportDateRange === 'custom' ? 'selected' : ''}>Personalizado</option>
+                                </select>
+                                <div id="custom-date-range-picker" class="flex items-center gap-2 ${state.reportDateRange === 'custom' ? '' : 'hidden'}">
+                                    <input type="date" id="report-start-date" value="${state.reportCustomStartDate}" class="p-2 border border-gray-300 rounded-md text-sm">
+                                    <span>-</span>
+                                    <input type="date" id="report-end-date" value="${state.reportCustomEndDate}" class="p-2 border border-gray-300 rounded-md text-sm">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- KPIs -->
+                    <div id="report-kpis"></div>
+                    
+                    <!-- Charts -->
+                    <div class="grid grid-cols-1 lg:grid-cols-5 gap-8">
+                        <div class="bg-white p-6 rounded-lg shadow-md lg:col-span-3">
+                             <h3 class="text-xl font-bold text-gray-800 mb-4">Servicios por Día</h3>
+                             <canvas id="eventsOverTimeChart" class="max-h-80"></canvas>
+                        </div>
+                        <div class="bg-white p-6 rounded-lg shadow-md lg:col-span-2">
+                             <h3 class="text-xl font-bold text-gray-800 mb-4">Clientes Principales</h3>
+                             <canvas id="clientDistributionChart" class="max-h-80"></canvas>
+                        </div>
+                        <div class="bg-white p-6 rounded-lg shadow-md lg:col-span-5">
+                             <h3 class="text-xl font-bold text-gray-800 mb-4">Rendimiento por Operador</h3>
+                             <canvas id="operatorPerformanceChart" class="max-h-80"></canvas>
+                        </div>
+                    </div>
+                    
+                    <!-- Data Table -->
+                    <div id="report-data-table"></div>
+                </div>
+            `;
+            
+            renderReportKPIs(filteredEvents);
+            renderReportDataTable(filteredEvents);
+            generateChartData(filteredEvents);
+        }
+
+        function renderReportKPIs(events) {
+            const container = document.getElementById('report-kpis');
+            if (!container) return;
+            
+            const totalEvents = events.length;
+            
+            const clientCounts = events.reduce((acc, event) => {
+                acc[event.clientId] = (acc[event.clientId] || 0) + 1;
+                return acc;
+            }, {});
+            const topClientId = Object.keys(clientCounts).sort((a,b) => clientCounts[b] - clientCounts[a])[0];
+            const topClient = state.clients.find(c => c.id === topClientId);
+
+            const operatorCounts = events.reduce((acc, event) => {
+                if (event.operatorId) acc[event.operatorId] = (acc[event.operatorId] || 0) + 1;
+                return acc;
+            }, {});
+            const topOperatorId = Object.keys(operatorCounts).sort((a,b) => operatorCounts[b] - operatorCounts[a])[0];
+            const topOperator = state.operators.find(o => o.id === topOperatorId);
+
+            container.innerHTML = `
+                 <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div class="bg-white p-5 rounded-lg shadow-md flex items-center">
+                        <div class="bg-indigo-100 p-3 rounded-full"><svg class="h-6 w-6 text-indigo-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" /></svg></div>
+                        <div class="ml-4">
+                            <p class="text-sm text-gray-500">Total de Servicios</p>
+                            <p class="text-2xl font-bold text-gray-800">${totalEvents}</p>
+                        </div>
+                    </div>
+                     <div class="bg-white p-5 rounded-lg shadow-md flex items-center">
+                        <div class="bg-blue-100 p-3 rounded-full"><svg class="h-6 w-6 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" /></svg></div>
+                        <div class="ml-4">
+                            <p class="text-sm text-gray-500">Cliente Más Frecuente</p>
+                            <p class="text-xl font-bold text-gray-800 truncate" title="${topClient?.name || 'N/A'}">${topClient?.name || 'N/A'}</p>
+                        </div>
+                    </div>
+                     <div class="bg-white p-5 rounded-lg shadow-md flex items-center">
+                        <div class="bg-green-100 p-3 rounded-full"><svg class="h-6 w-6 text-green-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path d="M9 17a2 2 0 11-4 0 2 2 0 014 0zM19 17a2 2 0 11-4 0 2 2 0 014 0z" /><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16V6a1 1 0 00-1-1H4a1 1 0 00-1 1v10l2 2h8a1 1 0 001-1z" /><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h2a1 1 0 001-1V7a1 1 0 00-1-1h-2" /></svg></div>
+                        <div class="ml-4">
+                            <p class="text-sm text-gray-500">Operador Más Activo</p>
+                            <p class="text-xl font-bold text-gray-800 truncate" title="${topOperator?.name || 'N/A'}">${topOperator?.name || 'N/A'}</p>
+                        </div>
+                    </div>
+                 </div>
+            `;
+        }
+        
+        function renderReportDataTable(events) {
+            const container = document.getElementById('report-data-table');
+            if (!container) return;
+
+            const page = state.reportTablePage;
+            const rowsPerPage = state.reportTableRowsPerPage;
+            const totalPages = Math.ceil(events.length / rowsPerPage);
+            const paginatedEvents = events.slice((page - 1) * rowsPerPage, page * rowsPerPage);
+
+            const tableRows = paginatedEvents.map(event => {
+                const client = state.clients.find(c => c.id === event.clientId) || {};
+                const operator = state.operators.find(o => o.id === event.operatorId) || {};
+                return `
+                    <tr class="border-b hover:bg-gray-50 text-sm">
+                        <td class="p-3">${new Date(event.start).toLocaleDateString('es-ES')}</td>
+                        <td class="p-3">${new Date(event.start).toLocaleTimeString('es-ES', {hour: '2-digit', minute:'2-digit'})}</td>
+                        <td class="p-3">${event.type === 'recoleccion' ? 'Recolección' : 'Entrega'}</td>
+                        <td class="p-3">${client.name || 'N/A'}</td>
+                        <td class="p-3 hidden md:table-cell">${operator.name || 'N/A'}</td>
+                        <td class="p-3 hidden sm:table-cell">${event.material || 'N/A'}</td>
+                    </tr>
+                `;
+            }).join('');
+
+            container.innerHTML = `
+                <div class="bg-white p-6 rounded-lg shadow-md">
+                    <div class="flex justify-between items-center mb-4 flex-wrap gap-2">
+                         <h3 class="text-xl font-bold text-gray-800">Detalle de Servicios</h3>
+                         <button data-action="export-report-csv" class="bg-green-600 text-white font-bold py-2 px-4 rounded-lg hover:bg-green-700 transition duration-300 text-sm flex items-center gap-2">
+                             <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                             Exportar a CSV
+                         </button>
+                    </div>
+                    <div class="overflow-x-auto table-container">
+                        <table class="min-w-full">
+                             <thead class="bg-gray-100">
+                                <tr>
+                                    <th class="text-left p-3 uppercase font-semibold text-xs text-gray-600">Fecha</th>
+                                    <th class="text-left p-3 uppercase font-semibold text-xs text-gray-600">Hora</th>
+                                    <th class="text-left p-3 uppercase font-semibold text-xs text-gray-600">Tipo</th>
+                                    <th class="text-left p-3 uppercase font-semibold text-xs text-gray-600">Cliente</th>
+                                    <th class="text-left p-3 uppercase font-semibold text-xs text-gray-600 hidden md:table-cell">Operador</th>
+                                    <th class="text-left p-3 uppercase font-semibold text-xs text-gray-600 hidden sm:table-cell">Material</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${tableRows.length > 0 ? tableRows : `<tr><td colspan="6" class="text-center text-gray-500 py-8">No hay datos para el período seleccionado.</td></tr>`}
+                            </tbody>
+                        </table>
+                    </div>
+                    <!-- Pagination -->
+                    <div class="flex justify-between items-center mt-4 text-sm">
+                        <p class="text-gray-600">Mostrando ${Math.min((page - 1) * rowsPerPage + 1, events.length)} a ${Math.min(page * rowsPerPage, events.length)} de ${events.length} resultados</p>
+                        <div class="flex gap-1">
+                            <button data-action="prev-report-page" class="p-2 rounded-md hover:bg-gray-100 ${page === 1 ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600'}" ${page === 1 ? 'disabled' : ''}>&lt; Anterior</button>
+                            <button data-action="next-report-page" class="p-2 rounded-md hover:bg-gray-100 ${page >= totalPages ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600'}" ${page >= totalPages ? 'disabled' : ''}>Siguiente &gt;</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function generateChartData(filteredEvents) {
+            renderEventsOverTimeChart(filteredEvents);
+            renderOperatorPerformanceChart(filteredEvents);
+            renderClientDistributionChart(filteredEvents);
+        }
+
+        function renderEventsOverTimeChart(events) {
+            const ctx = document.getElementById('eventsOverTimeChart')?.getContext('2d');
+            if (!ctx) return;
+            
+            const eventCounts = events.reduce((acc, event) => {
+                const day = new Date(event.start).toISOString().split('T')[0];
+                acc[day] = (acc[day] || 0) + 1;
+                return acc;
+            }, {});
+
+            const sortedLabels = Object.keys(eventCounts).sort();
+
+            const chartData = {
+                labels: sortedLabels,
+                datasets: [{
+                    label: 'Servicios por Día',
+                    data: sortedLabels.map(label => eventCounts[label]),
+                    borderColor: 'rgb(79, 70, 229)',
+                    backgroundColor: 'rgba(79, 70, 229, 0.1)',
+                    fill: true,
+                    tension: 0.3
+                }]
+            };
+
+            activeCharts.eventsOverTime = new Chart(ctx, { 
+                type: 'line', 
+                data: chartData,
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: {
+                            type: 'time',
+                            time: { unit: 'day', displayFormats: { day: 'dd/MM' } },
+                            grid: { display: false }
+                        },
+                        y: {
+                            beginAtZero: true,
+                            ticks: { stepSize: 1 }
+                        }
+                    },
+                    plugins: { legend: { display: false } }
+                }
+            });
+        }
+        
+        function renderOperatorPerformanceChart(events) {
+            const ctx = document.getElementById('operatorPerformanceChart')?.getContext('2d');
+            if (!ctx) return;
+
+            const operatorStats = events.reduce((acc, event) => {
+                if (!event.operatorId) return acc;
+                if (!acc[event.operatorId]) {
+                    acc[event.operatorId] = { recoleccion: 0, entrega: 0, name: state.operators.find(o=>o.id === event.operatorId)?.name || 'Desconocido' };
+                }
+                acc[event.operatorId][event.type]++;
+                return acc;
+            }, {});
+
+            const sortedOperators = Object.values(operatorStats).sort((a,b) => (b.recoleccion + b.entrega) - (a.recoleccion + a.entrega));
+
+            const chartData = {
+                labels: sortedOperators.map(op => op.name),
+                datasets: [
+                    {
+                        label: 'Recolecciones',
+                        data: sortedOperators.map(op => op.recoleccion),
+                        backgroundColor: 'rgba(59, 130, 246, 0.7)', // blue-500
+                    },
+                    {
+                        label: 'Entregas',
+                        data: sortedOperators.map(op => op.entrega),
+                        backgroundColor: 'rgba(16, 185, 129, 0.7)', // green-500
+                    }
+                ]
+            };
+
+            activeCharts.operatorPerformance = new Chart(ctx, { 
+                type: 'bar', 
+                data: chartData,
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true, ticks: { stepSize: 1 } } },
+                    plugins: { legend: { position: 'top' } }
+                }
+            });
+        }
+        
+        function renderClientDistributionChart(events) {
+            const ctx = document.getElementById('clientDistributionChart')?.getContext('2d');
+            if (!ctx) return;
+            
+            const clientCounts = events.reduce((acc, event) => {
+                if (event.clientId) {
+                    acc[event.clientId] = (acc[event.clientId] || 0) + 1;
+                }
+                return acc;
+            }, {});
+            
+            const topClients = Object.entries(clientCounts).sort(([,a],[,b]) => b - a).slice(0, 7);
+
+            const chartData = {
+                labels: topClients.map(([id]) => state.clients.find(c => c.id === id)?.name || 'Desconocido'),
+                datasets: [{
+                    label: 'Servicios por Cliente',
+                    data: topClients.map(([, count]) => count),
+                    backgroundColor: [
+                        'rgba(79, 70, 229, 0.7)', 'rgba(59, 130, 246, 0.7)', 'rgba(16, 185, 129, 0.7)', 
+                        'rgba(245, 158, 11, 0.7)', 'rgba(239, 68, 68, 0.7)', 'rgba(139, 92, 246, 0.7)', 
+                        'rgba(217, 70, 239, 0.7)'
+                    ],
+                    borderColor: '#fff',
+                    borderWidth: 1
+                }]
+            };
+
+            activeCharts.clientDistribution = new Chart(ctx, { 
+                type: 'bar', 
+                data: chartData,
+                options: {
+                    indexAxis: 'y',
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: { x: { beginAtZero: true, ticks: { stepSize: 1 } } }
+                }
+            });
+        }
+        
+        function handleExportReportCSV() {
+            const eventsToExport = getFilteredReportEvents();
+            if (eventsToExport.length === 0) {
+                showToast("No hay datos para exportar en el período seleccionado.", "error");
+                return;
+            }
+            let csvContent = "FECHA,HORA,TIPO,CLIENTE,DIRECCION,OPERADOR,MATERIAL,NOTAS_EVENTO\n";
+            eventsToExport.forEach(event => {
+                const client = state.clients.find(c => c.id === event.clientId) || {};
+                const operator = state.operators.find(o => o.id === event.operatorId) || {};
+                const row = [
+                    new Date(event.start).toLocaleDateString('es-ES'),
+                    new Date(event.start).toLocaleTimeString('es-ES', {hour: '2-digit', minute:'2-digit'}),
+                    event.type,
+                    `"${client.name || ''}"`,
+                    `"${client.address || ''}"`,
+                    `"${operator.name || ''}"`,
+                    `"${event.material || ''}"`,
+                    `"${(event.notes || '').replace(/"/g, '""')}"` // Escape double quotes
+                ].join(',');
+                csvContent += row + '\n';
+            });
+            downloadFile(`reporte_ecoagenda_${new Date().toISOString().split('T')[0]}.csv`, csvContent, 'text/csv;charset=utf-8;');
+            showToast('Reporte exportado a CSV.');
+        }
+
+
         // --- EVENT LISTENERS ---
         document.body.addEventListener('click', (e) => {
-            const targetElement = e.target.closest('[data-action]') || e.target.closest('[data-view]') || e.target.closest('[data-calendar-view]');
+            const targetElement = e.target.closest('[data-action]') || e.target.closest('[data-view]') || e.target.closest('[data-calendar-view]') || e.target.closest('[data-gestion-view]');
             const isDropdownClick = e.target.closest('#io-dropdown-container');
 
             if (!targetElement && !isDropdownClick) {
@@ -735,6 +1160,7 @@
             
             const action = targetElement.dataset.action;
             const view = targetElement.dataset.view;
+            const gestionView = targetElement.dataset.gestionView;
             const calendarView = targetElement.dataset.calendarView;
 
             if (action === 'toggle-io-dropdown') {
@@ -754,6 +1180,12 @@
                  targetElement.classList.remove('text-gray-600', 'hover:bg-gray-200');
                  render();
                  return;
+            }
+            
+            if (gestionView) {
+                state.gestionView = gestionView;
+                renderGestionView();
+                return;
             }
 
             if (calendarView) {
@@ -839,7 +1271,7 @@
                 if (client) renderNotesModal(`Notas para ${client.name}`, client.notes);
             }
             if (action === 'export-agenda-csv') {
-                renderConfirmModal('Confirmar Exportación', 'Se generará un archivo CSV con los datos de la vista actual. ¿Deseas continuar?', () => {
+                renderConfirmModal('Confirmar Exportación', 'Se generará un archivo CSV con TODOS los datos de la agenda. ¿Deseas continuar?', () => {
                     let csvContent = "FECHA,HORA,TIPO,CLIENTE,DIRECCION,OPERADOR,MATERIAL,NOTAS\n";
                     state.events.forEach(event => {
                         const client = state.clients.find(c => c.id === event.clientId) || {};
@@ -893,14 +1325,34 @@
             if (action.startsWith('download-')) {
                 const actions = {
                     'download-general-template': handleDownloadGeneralTemplate,
-                    'download-template': state.currentView === 'clientes' ? handleDownloadClientTemplate : handleDownloadOperatorTemplate
                 };
                 actions[action]();
             }
+             if (action === 'download-template' && state.currentView === 'gestion') {
+                 state.gestionView === 'clientes' ? handleDownloadClientTemplate() : handleDownloadOperatorTemplate();
+             }
+
             if(action === 'import-agenda'){
                 renderConfirmModal('Confirmar Importación', 'Seleccionarás un archivo CSV para importar. Asegúrate de que el formato sea correcto.', () => {
                     document.getElementById('import-agenda-input').click();
                 });
+            }
+
+            // --- NEW: Report Actions ---
+            if(action === 'export-report-csv') handleExportReportCSV();
+            if(action === 'prev-report-page') {
+                if(state.reportTablePage > 1) {
+                    state.reportTablePage--;
+                    renderReportDataTable(getFilteredReportEvents());
+                }
+            }
+            if(action === 'next-report-page') {
+                const events = getFilteredReportEvents();
+                const totalPages = Math.ceil(events.length / state.reportTableRowsPerPage);
+                if(state.reportTablePage < totalPages) {
+                    state.reportTablePage++;
+                    renderReportDataTable(events);
+                }
             }
             
             // Close dropdown after action
@@ -908,12 +1360,36 @@
                  document.getElementById('io-dropdown-menu').classList.add('hidden');
             }
         });
+
+        mainContent.addEventListener('change', e => {
+            if (e.target.id === 'date-range-selector') {
+                state.reportDateRange = e.target.value;
+                state.reportTablePage = 1; // Reset page on filter change
+                if(e.target.value !== 'custom'){
+                     renderReportsView();
+                } else {
+                     document.getElementById('custom-date-range-picker')?.classList.remove('hidden');
+                }
+            }
+             if (e.target.id === 'report-start-date' || e.target.id === 'report-end-date') {
+                state.reportCustomStartDate = document.getElementById('report-start-date').value;
+                state.reportCustomEndDate = document.getElementById('report-end-date').value;
+                 if(state.reportCustomStartDate && state.reportCustomEndDate) {
+                    state.reportTablePage = 1; // Reset page
+                    renderReportsView();
+                }
+            }
+            if (e.target.id === 'tabs') {
+                state.gestionView = e.target.value;
+                renderGestionView();
+            }
+        });
         
         document.getElementById('add-new-btn-floating').onclick = () => {
             state.editingItem = null;
             if (state.currentView === 'agenda') renderEventForm({}, state.currentDate);
-            if (state.currentView === 'clientes') renderClientForm();
-            if (state.currentView === 'operadores') renderOperatorForm();
+            else if (state.currentView === 'gestion' && state.gestionView === 'clientes') renderClientForm();
+            else if (state.currentView === 'gestion' && state.gestionView === 'operadores') renderOperatorForm();
         };
 
         modalContainer.addEventListener('submit', (e) => {
@@ -958,6 +1434,7 @@
         loadState();
         render();
 
+    });
     </script>
 </body>
 </html>
